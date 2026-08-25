@@ -11,8 +11,10 @@
 //
 
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 
 export type CliProfile = {
   baseUrl: string;
@@ -54,7 +56,15 @@ export async function saveConfig(config: CliConfig): Promise<void> {
   const path = configPath();
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  if (process.platform !== 'win32') await chmod(path, 0o600);
+  if (process.platform !== 'win32') {
+    await chmod(path, 0o600);
+    return;
+  }
+
+  const execFileAsync = promisify(execFile);
+  const identity = (await execFileAsync('whoami.exe', [], { windowsHide: true })).stdout.trim();
+  if (!identity) throw new Error('Cannot determine the current Windows user for credential protection');
+  await execFileAsync('icacls.exe', [path, '/inheritance:r', '/grant:r', `${identity}:(F)`], { windowsHide: true });
 }
 
 export function envToken(): string | undefined {
@@ -69,4 +79,3 @@ export async function resolveProfile(name?: string): Promise<{ config: CliConfig
   if (!profile) throw new Error(`Profile "${profileName}" is not configured. Run: gantt auth login`);
   return { config, name: profileName, profile };
 }
-
