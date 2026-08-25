@@ -56,3 +56,8 @@ gantt dependencies link --from <predecessor> --to <successor> --type FS
 Публичный контракт находится в [OpenAPI](docs/openapi.yaml). Операции чтения и
 изменения проходят через общий typed catalog; mutation calls требуют текущий
 `baseVersion` и `Idempotency-Key`, а ответ содержит authoritative receipt.
+
+Релизная последовательность и безопасное применение Prisma migration описаны в
+[deployment checklist](docs/deployment.md). Серверные routes уже зарегистрированы
+в проекте, но миграцию и публикацию npm нужно выполнять отдельно в окружении
+релиза.
