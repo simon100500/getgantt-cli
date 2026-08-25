@@ -1,0 +1,186 @@
+openapi: 3.1.0
+info:
+  title: GetGantt CLI API
+  version: '1'
+  description: >-
+    Stable HTTPS surface for the GetGantt CLI. Browser JWT sessions and CLI
+    personal access tokens are separate credentials.
+servers:
+  - url: https://ai.getgantt.ru/api/cli/v1
+security:
+  - personalAccessToken: []
+paths:
+  /me:
+    get:
+      operationId: getMe
+      responses:
+        '200':
+          description: Token identity and scopes
+          content: { application/json: { schema: { $ref: '#/components/schemas/MeResponse' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /projects:
+    get:
+      operationId: listProjects
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: Accessible projects
+          content: { application/json: { schema: { $ref: '#/components/schemas/ProjectPage' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /projects/{projectId}:
+    get:
+      operationId: getProject
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      responses:
+        '200':
+          description: Project metadata and graph version
+          content: { application/json: { schema: { type: object, required: [project], properties: { project: { $ref: '#/components/schemas/Project' } } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /projects/{projectId}/tasks:
+    get:
+      operationId: listTasks
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: Bounded task page
+          content: { application/json: { schema: { $ref: '#/components/schemas/TaskPage' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /tool-catalog:
+    get:
+      operationId: getToolCatalog
+      responses:
+        '200':
+          description: Public typed operations
+          content: { application/json: { schema: { type: object, required: [version, operations], properties: { version: { type: string }, operations: { type: array, items: { $ref: '#/components/schemas/ToolOperation' } } } } } }
+  /tool-calls:
+    post:
+      operationId: callTool
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: { type: string, maxLength: 200 }
+          description: Required for every mutating operation; reuse it to safely retry an unknown response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tool, arguments]
+              properties:
+                catalogVersion: { type: string, enum: ['1'] }
+                projectId: { type: string, format: uuid }
+                tool: { type: string, description: Operation name from tool-catalog }
+                arguments: { type: object, additionalProperties: true }
+                baseVersion: { type: integer, minimum: 0, description: Required for mutations }
+                dryRun: { type: boolean, default: false }
+      responses:
+        '200': { description: Read result or accepted mutation with receipt, content: { application/json: { schema: { $ref: '#/components/schemas/ToolCallResponse' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+components:
+  securitySchemes:
+    personalAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: ggt_pat
+  parameters:
+    ProjectId: { in: path, name: projectId, required: true, schema: { type: string, format: uuid } }
+    Limit: { in: query, name: limit, required: false, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
+    Cursor: { in: query, name: cursor, required: false, schema: { type: string } }
+  responses:
+    BadRequest: { description: Invalid request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    Unauthorized: { description: Invalid, expired, or revoked PAT, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    Forbidden: { description: Missing scope or project permission, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    NotFound: { description: Resource is not available to this token, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+    Conflict: { description: Graph version conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } } }
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+            requestId: { type: string }
+    MeResponse:
+      type: object
+      required: [user, token]
+      properties:
+        user: { type: object, required: [id, email], properties: { id: { type: string }, email: { type: string, format: email } } }
+        token: { type: object, required: [id, scopes, projectIds], properties: { id: { type: string }, scopes: { type: array, items: { type: string } }, projectIds: { type: array, items: { type: string } } } }
+    Project:
+      type: object
+      required: [id, name, status, version, taskCount]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [active, archived] }
+        version: { type: integer }
+        taskCount: { type: integer }
+        accessRole: { type: string, enum: [owner, editor, viewer] }
+        permissions: { type: object, additionalProperties: { type: string } }
+    ProjectPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Project' } }
+        nextCursor: { type: [string, 'null'] }
+    Task:
+      type: object
+      required: [id, name, startDate, endDate]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        startDate: { type: string, format: date-time }
+        endDate: { type: string, format: date-time }
+        parentId: { type: [string, 'null'] }
+        dependencies: { type: array, items: { type: object, additionalProperties: true } }
+    TaskPage:
+      type: object
+      required: [projectId, version, items, nextCursor]
+      properties:
+        projectId: { type: string, format: uuid }
+        version: { type: integer }
+        items: { type: array, items: { $ref: '#/components/schemas/Task' } }
+        nextCursor: { type: [string, 'null'] }
+    ToolOperation:
+      type: object
+      required: [name, description, inputSchema, mutating, scope]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        inputSchema: { type: object, additionalProperties: true }
+        mutating: { type: boolean }
+        scope: { type: string }
+    ToolCallResponse:
+      type: object
+      required: [catalogVersion, tool, data, requestId]
+      properties:
+        catalogVersion: { type: string }
+        tool: { type: string }
+        projectId: { type: [string, 'null'] }
+        data: {}
+        requestId: { type: string }
+        receipt:
+          type: object
+          properties:
+            idempotencyKey: { type: string }
+            baseVersion: { type: integer }
+            newVersion: { type: integer }
+            status: { type: string }
+            changedTaskIds: { type: array, items: { type: string } }
+            changedDependencyIds: { type: array, items: { type: string } }

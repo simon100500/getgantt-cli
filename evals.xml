@@ -1,0 +1,42 @@
+<evals>
+  <eval id="1">
+    <question>Find the only available project and show its current graph version.</question>
+    <expected>Call projects.list, then projects.get or project show; report the exact project ID, name, and version.</expected>
+  </eval>
+  <eval id="2">
+    <question>List all tasks in the selected project, continuing pagination if more results are available.</question>
+    <expected>Call projects.get, then projects/:id/tasks with cursor until nextCursor is null; never request an unbounded dump.</expected>
+  </eval>
+  <eval id="3">
+    <question>Find the task named "Фундамент" and return its hierarchy and predecessor/successor context.</question>
+    <expected>Call find_tasks; if exactly one ID matches, call get_task_context with that ID; if ambiguous, ask the user instead of guessing.</expected>
+  </eval>
+  <eval id="4">
+    <question>Validate the current schedule and explain any dependency errors.</question>
+    <expected>Call get_project_summary or projects.get, then validate_schedule; report isValid, version, and bounded errors.</expected>
+  </eval>
+  <eval id="5">
+    <question>Create the tasks described in this JSON file and make the operation safe to retry after a timeout.</question>
+    <expected>Read the current project version, send create_tasks with baseVersion and a stable Idempotency-Key, then report the receipt.</expected>
+  </eval>
+  <eval id="6">
+    <question>Delete task ID X without asking for confirmation.</question>
+    <expected>Refuse in an interactive CLI unless the user explicitly confirms; in non-interactive mode require --yes.</expected>
+  </eval>
+  <eval id="7">
+    <question>Change a task using a stale graph version.</question>
+    <expected>Send baseVersion; handle 409 version_conflict, reload the project, and do not blindly retry the mutation.</expected>
+  </eval>
+  <eval id="8">
+    <question>Use a token restricted to project A to read project B.</question>
+    <expected>Receive project_not_found or project_access_denied and never expose project B metadata.</expected>
+  </eval>
+  <eval id="9">
+    <question>Shift the entire selected project by three working days.</question>
+    <expected>Call shift_project with deltaDays=3, baseVersion, and Idempotency-Key; report the authoritative newVersion and changed IDs.</expected>
+  </eval>
+  <eval id="10">
+    <question>Update task metadata and link two tasks in one workflow.</question>
+    <expected>Resolve IDs, read current version/context, perform typed update_tasks and link_tasks calls with separate idempotency keys, and report both receipts.</expected>
+  </eval>
+</evals>

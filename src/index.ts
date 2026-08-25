@@ -12,10 +12,12 @@
 //
 
 import { Command } from 'commander';
+import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { GetGanttApiClient } from './api-client.js';
-import { envToken, loadConfig, resolveProfile, saveConfig, type CliProfile } from './config.js';
+import { ApiError, GetGanttApiClient, type Project } from './api-client.js';
+import { envToken, loadConfig, saveConfig, type CliProfile } from './config.js';
 import { print, printError } from './output.js';
 
 function isJson(command: Command): boolean {
@@ -72,9 +74,86 @@ function makeClient(profile: CliProfile, command: Command, tokenOverride?: strin
   return new GetGanttApiClient(profile.baseUrl || baseUrl(command), tokenOverride ?? envToken() ?? profile.token);
 }
 
-async function resolveClient(command: Command): Promise<{ client: GetGanttApiClient; config: Awaited<ReturnType<typeof loadConfig>>; profileName: string; profile: CliProfile }> {
-  const resolved = await resolveProfile(command.optsWithGlobals().profile);
-  return { config: resolved.config, profileName: resolved.name, profile: resolved.profile, client: makeClient(resolved.profile, command) };
+type ResolvedClient = { client: GetGanttApiClient; config: Awaited<ReturnType<typeof loadConfig>>; profileName: string; profile: CliProfile };
+
+async function resolveClient(command: Command): Promise<ResolvedClient> {
+  const config = await loadConfig();
+  const requestedName = command.optsWithGlobals().profile as string | undefined;
+  const profileName = requestedName ?? config.currentProfile;
+  const storedProfile = config.profiles[profileName];
+  const token = envToken();
+  if (token) {
+    const profile = storedProfile ?? { baseUrl: baseUrl(command), token };
+    return { config, profileName: storedProfile ? profileName : 'env', profile, client: makeClient(profile, command, token) };
+  }
+  if (!storedProfile) throw new Error(`Profile "${profileName}" is not configured. Run: gantt auth login`);
+  return { config, profileName, profile: storedProfile, client: makeClient(storedProfile, command) };
+}
+
+async function resolveProject(command: Command, resolved: ResolvedClient): Promise<Project> {
+  const projectsResult = await resolved.client.projects();
+  const explicit = command.optsWithGlobals().project as string | undefined;
+  const selector = explicit ?? resolved.profile.projectId;
+  const matches = selector
+    ? projectsResult.items.filter((project) => project.id === selector || project.name === selector)
+    : projectsResult.items.length === 1 ? [projectsResult.items[0]!] : [];
+  if (matches.length !== 1) {
+    if (matches.length === 0) throw new Error('A single project is required. Use --project or `gantt projects use <id-or-exact-name>`.');
+    throw new Error(`Project name is ambiguous: ${selector}`);
+  }
+  const detail = await resolved.client.project(matches[0]!.id);
+  return detail.project;
+}
+
+async function readJsonFile(path: string): Promise<Record<string, unknown>> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, 'utf8'));
+  } catch (error) {
+    throw new Error(`Cannot read JSON file ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (Array.isArray(parsed)) return { items: parsed };
+  if (!parsed || typeof parsed !== 'object') throw new Error(`JSON file ${path} must contain an object or array`);
+  return parsed as Record<string, unknown>;
+}
+
+async function confirmDestructive(message: string): Promise<void> {
+  if (!process.stdin.isTTY) throw new Error('Destructive operation requires --yes in non-interactive mode');
+  const readline = createInterface({ input, output });
+  try {
+    const answer = await readline.question(`${message} [y/N] `);
+    if (!/^y(es)?$/i.test(answer.trim())) throw new Error('Operation cancelled');
+  } finally {
+    readline.close();
+  }
+}
+
+async function callTool(
+  command: Command,
+  tool: string,
+  args: Record<string, unknown>,
+  mutating = false,
+): Promise<void> {
+  const resolved = await resolveClient(command);
+  const project = await resolveProject(command, resolved);
+  const response = await resolved.client.toolCall({
+    projectId: project.id,
+    tool,
+    arguments: args,
+    ...(mutating ? { baseVersion: project.version ?? undefined, idempotencyKey: randomUUID() } : {}),
+  });
+  print(mutating ? { data: response.data, receipt: response.receipt, requestId: response.requestId } : response.data, isJson(command), JSON.stringify(mutating ? response.receipt ?? response.data : response.data, null, 2));
+}
+
+function exitCodeForError(error: unknown): number {
+  if (error instanceof ApiError) {
+    if (error.status === 401) return 3;
+    if (error.status === 403) return 4;
+    if (error.status === 404) return 5;
+    if (error.status === 409) return 7;
+    if (error.status === 429 || error.status >= 500) return 8;
+  }
+  return 2;
 }
 
 const program = new Command()
@@ -167,6 +246,9 @@ projects.command('use <idOrName>')
     const result = await resolved.client.projects();
     const matches = result.items.filter((project) => project.id === idOrName || project.name === idOrName);
     if (matches.length !== 1) throw new Error(matches.length === 0 ? `Project not found: ${idOrName}` : `Project name is ambiguous: ${idOrName}`);
+    if (!resolved.config.profiles[resolved.profileName]) {
+      throw new Error('GETGANTT_TOKEN is supplied by the environment; use --project for CI instead of persisting a selection');
+    }
     resolved.profile.projectId = matches[0]!.id;
     resolved.config.profiles[resolved.profileName] = resolved.profile;
     await saveConfig(resolved.config);
@@ -178,18 +260,112 @@ projects.command('current')
   .action(async function (this: Command) {
     const command = this.parent ?? program;
     const resolved = await resolveClient(command);
-    const projectsResult = await resolved.client.projects();
-    const explicit = command.optsWithGlobals().project as string | undefined;
-    const selected = explicit
-      ? projectsResult.items.filter((project) => project.id === explicit || project.name === explicit)
-      : resolved.profile.projectId
-        ? projectsResult.items.filter((project) => project.id === resolved.profile.projectId)
-        : projectsResult.items.length === 1 ? [projectsResult.items[0]!] : [];
-    if (selected.length !== 1) throw new Error('A single project is required. Use --project or `gantt projects use <id-or-exact-name>`.');
-    print({ project: selected[0] }, isJson(command), `${selected[0]!.name} (${selected[0]!.id})`);
+    const project = await resolveProject(command, resolved);
+    print({ project }, isJson(command), `${project.name} (${project.id})`);
+  });
+
+const project = program.command('project').description('Inspect the selected project');
+
+project.command('show')
+  .description('show project metadata and graph version')
+  .action(async function (this: Command) {
+    const command = this.parent ?? program;
+    const resolved = await resolveClient(command);
+    const selected = await resolveProject(command, resolved);
+    print({ project: selected }, isJson(command), `${selected.name} — version ${selected.version ?? '?'}, ${selected.taskCount ?? 0} tasks`);
+  });
+
+const tasks = program.command('tasks').description('Read and change project tasks');
+
+tasks.command('list')
+  .description('list tasks in the selected project')
+  .option('--limit <number>', 'maximum number of tasks', '500')
+  .action(async function (this: Command, options: { limit: string }) {
+    const command = this.parent ?? program;
+    const resolved = await resolveClient(command);
+    const project = await resolveProject(command, resolved);
+    const result = await resolved.client.tasks(project.id, Math.min(Math.max(Number.parseInt(options.limit, 10) || 500, 1), 5000));
+    print(result, isJson(command), result.items.map((task: any) => `${task.id}  ${task.name}  ${String(task.startDate).slice(0, 10)} → ${String(task.endDate).slice(0, 10)}`).join('\n'));
+  });
+
+tasks.command('find <query>')
+  .description('find tasks by name')
+  .option('--limit <number>', 'maximum matches', '20')
+  .action(async function (this: Command, query: string, options: { limit: string }) {
+    await callTool(this.parent ?? program, 'find_tasks', { query, limit: Number.parseInt(options.limit, 10) || 20 });
+  });
+
+tasks.command('show <taskId>')
+  .description('show hierarchy and dependency context for a task')
+  .action(async function (this: Command, taskId: string) {
+    await callTool(this.parent ?? program, 'get_task_context', { taskId });
+  });
+
+tasks.command('create')
+  .description('create a relative task graph from a JSON file')
+  .requiredOption('--file <path>', 'JSON file containing create_tasks arguments')
+  .action(async function (this: Command, options: { file: string }) {
+    await callTool(this.parent ?? program, 'create_tasks', await readJsonFile(options.file), true);
+  });
+
+tasks.command('update')
+  .description('update task metadata from a JSON file')
+  .requiredOption('--file <path>', 'JSON file containing update_tasks arguments')
+  .action(async function (this: Command, options: { file: string }) {
+    await callTool(this.parent ?? program, 'update_tasks', await readJsonFile(options.file), true);
+  });
+
+tasks.command('delete <taskId>')
+  .description('delete one task after explicit confirmation')
+  .option('--yes', 'confirm destructive operation')
+  .action(async function (this: Command, taskId: string, options: { yes?: boolean }) {
+    if (!options.yes) await confirmDestructive(`Delete task ${taskId}?`);
+    await callTool(this.parent ?? program, 'delete_tasks', { taskIds: [taskId] }, true);
+  });
+
+const dependencies = program.command('dependencies').description('Manage task dependencies');
+
+dependencies.command('link')
+  .requiredOption('--from <taskId>', 'predecessor task ID')
+  .requiredOption('--to <taskId>', 'successor task ID')
+  .option('--type <type>', 'FS, SS, FF, or SF', 'FS')
+  .option('--lag <days>', 'signed lag in project days', '0')
+  .action(async function (this: Command, options: { from: string; to: string; type: string; lag: string }) {
+    await callTool(this.parent ?? program, 'link_tasks', { links: [{ predecessorTaskId: options.from, successorTaskId: options.to, type: options.type, lag: Number.parseInt(options.lag, 10) || 0 }] }, true);
+  });
+
+dependencies.command('unlink')
+  .requiredOption('--from <taskId>', 'predecessor task ID')
+  .requiredOption('--to <taskId>', 'successor task ID')
+  .action(async function (this: Command, options: { from: string; to: string }) {
+    await callTool(this.parent ?? program, 'unlink_tasks', { links: [{ predecessorTaskId: options.from, successorTaskId: options.to }] }, true);
+  });
+
+const schedule = program.command('schedule').description('Validate and shift the schedule');
+
+schedule.command('validate')
+  .description('validate dependencies and schedule health')
+  .action(async function (this: Command) {
+    await callTool(this.parent ?? program, 'validate_schedule', {});
+  });
+
+schedule.command('slice')
+  .description('read a bounded schedule slice')
+  .option('--start <date>', 'inclusive start date')
+  .option('--end <date>', 'inclusive end date')
+  .action(async function (this: Command, options: { start?: string; end?: string }) {
+    await callTool(this.parent ?? program, 'get_schedule_slice', { ...(options.start ? { startDate: options.start } : {}), ...(options.end ? { endDate: options.end } : {}) });
+  });
+
+schedule.command('shift')
+  .requiredOption('--days <number>', 'signed number of project days')
+  .option('--yes', 'confirm destructive operation')
+  .action(async function (this: Command, options: { days: string; yes?: boolean }) {
+    if (!options.yes) await confirmDestructive('Shift the entire project schedule?');
+    await callTool(this.parent ?? program, 'shift_project', { deltaDays: Number.parseInt(options.days, 10) }, true);
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {
   printError(error, Boolean(program.opts().json));
-  process.exitCode = 1;
+  process.exitCode = exitCodeForError(error);
 });

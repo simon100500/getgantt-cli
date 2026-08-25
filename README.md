@@ -37,3 +37,22 @@ GETGANTT_TOKEN=ggt_pat_... gantt --json projects list
 
 В MVP credentials хранятся в файле пользователя с ограниченными правами;
 интеграция с системным keychain запланирована отдельным этапом.
+
+Доступные рабочие команды текущего среза:
+
+```bash
+gantt project show
+gantt tasks list --json
+gantt tasks find "фундамент"
+gantt tasks show <task-id>
+gantt schedule validate
+gantt schedule shift --days 3 --yes
+gantt tasks create --file create.json
+gantt tasks update --file update.json
+gantt tasks delete <task-id> --yes
+gantt dependencies link --from <predecessor> --to <successor> --type FS
+```
+
+Публичный контракт находится в [OpenAPI](docs/openapi.yaml). Операции чтения и
+изменения проходят через общий typed catalog; mutation calls требуют текущий
+`baseVersion` и `Idempotency-Key`, а ответ содержит authoritative receipt.
