@@ -31,6 +31,7 @@ export type ToolCallResponse<T = unknown> = {
   tool: string;
   projectId: string | null;
   data: T;
+  dryRun?: boolean;
   receipt?: {
     idempotencyKey?: string;
     baseVersion?: number;
@@ -48,6 +49,7 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly details?: unknown,
+    readonly requestId?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -57,7 +59,7 @@ export class ApiError extends Error {
 export class GetGanttApiClient {
   private readonly baseUrl: string;
 
-  constructor(baseUrl: string, private readonly token: string) {
+  constructor(baseUrl: string, private readonly token: string, private readonly timeoutMs = 30_000) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
   }
 
@@ -103,6 +105,7 @@ export class GetGanttApiClient {
     arguments?: Record<string, unknown>;
     baseVersion?: number;
     idempotencyKey?: string;
+    dryRun?: boolean;
   }): Promise<ToolCallResponse<T>> {
     return this.post<ToolCallResponse<T>>('/tool-calls', {
       catalogVersion: '1',
@@ -110,6 +113,7 @@ export class GetGanttApiClient {
       tool: params.tool,
       arguments: params.arguments ?? {},
       ...(params.baseVersion === undefined ? {} : { baseVersion: params.baseVersion }),
+      ...(params.dryRun === undefined ? {} : { dryRun: params.dryRun }),
     }, params.idempotencyKey);
   }
 
@@ -129,14 +133,30 @@ export class GetGanttApiClient {
   }
 
   private async request<T>(path: string, init: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}/api/cli/v1${path}`, {
-      ...init,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${this.token}`,
-        ...(init.headers ?? {}),
-      },
-    });
+    const controller = new AbortController();
+    const timeout = this.timeoutMs > 0 ? setTimeout(() => controller.abort(), this.timeoutMs) : undefined;
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/cli/v1${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${this.token}`,
+          ...(init.headers ?? {}),
+        },
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new ApiError(`GetGantt API request timed out after ${this.timeoutMs} ms`, 503, 'request_timeout');
+      }
+      if (error instanceof TypeError) {
+        throw new ApiError('Unable to reach the GetGantt API', 503, 'network_error');
+      }
+      throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
     const body = await response.json().catch(() => null) as any;
     if (!response.ok) {
       throw new ApiError(
@@ -144,6 +164,7 @@ export class GetGanttApiClient {
         response.status,
         body?.error?.code,
         body?.error?.details,
+        body?.error?.requestId,
       );
     }
     return body as T;

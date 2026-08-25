@@ -25,7 +25,13 @@ function isJson(command: Command): boolean {
 }
 
 function baseUrl(command: Command): string {
-  return String(command.optsWithGlobals().server ?? 'https://ai.getgantt.ru');
+  const options = command.optsWithGlobals();
+  return String(options.server ?? options.apiUrl ?? 'https://ai.getgantt.ru');
+}
+
+function timeoutMs(command: Command): number {
+  const value = Number.parseInt(String(command.optsWithGlobals().timeout ?? '30000'), 10);
+  return Number.isFinite(value) && value >= 0 ? value : 30_000;
 }
 
 async function readToken(forceStdin = false): Promise<string> {
@@ -71,7 +77,13 @@ async function readToken(forceStdin = false): Promise<string> {
 }
 
 function makeClient(profile: CliProfile, command: Command, tokenOverride?: string): GetGanttApiClient {
-  return new GetGanttApiClient(profile.baseUrl || baseUrl(command), tokenOverride ?? envToken() ?? profile.token);
+  const options = command.optsWithGlobals();
+  const requestedBaseUrl = typeof options.server === 'string'
+    ? options.server
+    : typeof options.apiUrl === 'string'
+      ? options.apiUrl
+      : undefined;
+  return new GetGanttApiClient(requestedBaseUrl || profile.baseUrl || baseUrl(command), tokenOverride ?? envToken() ?? profile.token, timeoutMs(command));
 }
 
 type ResolvedClient = { client: GetGanttApiClient; config: Awaited<ReturnType<typeof loadConfig>>; profileName: string; profile: CliProfile };
@@ -133,6 +145,7 @@ async function callTool(
   tool: string,
   args: Record<string, unknown>,
   mutating = false,
+  dryRun = false,
 ): Promise<void> {
   const resolved = await resolveClient(command);
   const project = await resolveProject(command, resolved);
@@ -140,9 +153,9 @@ async function callTool(
     projectId: project.id,
     tool,
     arguments: args,
-    ...(mutating ? { baseVersion: project.version ?? undefined, idempotencyKey: randomUUID() } : {}),
+    ...(mutating ? { baseVersion: project.version ?? undefined, idempotencyKey: randomUUID(), dryRun } : {}),
   });
-  print(mutating ? { data: response.data, receipt: response.receipt, requestId: response.requestId } : response.data, isJson(command), JSON.stringify(mutating ? response.receipt ?? response.data : response.data, null, 2));
+  print(mutating ? { data: response.data, receipt: response.receipt, dryRun, requestId: response.requestId } : response.data, isJson(command), JSON.stringify(mutating ? { ...(response.receipt ?? {}), ...(dryRun ? { status: 'preview' } : {}) } : response.data, null, 2));
 }
 
 function exitCodeForError(error: unknown): number {
@@ -150,6 +163,7 @@ function exitCodeForError(error: unknown): number {
     if (error.status === 401) return 3;
     if (error.status === 403) return 4;
     if (error.status === 404) return 5;
+    if (error.status === 400 || error.status === 422) return 6;
     if (error.status === 409) return 7;
     if (error.status === 429 || error.status >= 500) return 8;
   }
@@ -160,9 +174,11 @@ const program = new Command()
   .name('gantt')
   .description('GetGantt command-line client')
   .option('--json', 'print machine-readable JSON')
-  .option('--server <url>', 'GetGantt server URL', 'https://ai.getgantt.ru')
+  .option('--server <url>', 'GetGantt server URL')
+  .option('--api-url <url>', 'Alias for --server')
   .option('--profile <name>', 'profile name')
-  .option('--project <id>', 'project ID or exact name');
+  .option('--project <id>', 'project ID or exact name')
+  .option('--timeout <ms>', 'HTTP request timeout in milliseconds', '30000');
 
 const auth = program.command('auth').description('Manage personal access tokens and profiles');
 
@@ -304,23 +320,34 @@ tasks.command('show <taskId>')
 tasks.command('create')
   .description('create a relative task graph from a JSON file')
   .requiredOption('--file <path>', 'JSON file containing create_tasks arguments')
-  .action(async function (this: Command, options: { file: string }) {
-    await callTool(this.parent ?? program, 'create_tasks', await readJsonFile(options.file), true);
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, options: { file: string; dryRun?: boolean }) {
+    await callTool(this.parent ?? program, 'create_tasks', await readJsonFile(options.file), true, options.dryRun);
   });
 
 tasks.command('update')
   .description('update task metadata from a JSON file')
   .requiredOption('--file <path>', 'JSON file containing update_tasks arguments')
-  .action(async function (this: Command, options: { file: string }) {
-    await callTool(this.parent ?? program, 'update_tasks', await readJsonFile(options.file), true);
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, options: { file: string; dryRun?: boolean }) {
+    await callTool(this.parent ?? program, 'update_tasks', await readJsonFile(options.file), true, options.dryRun);
+  });
+
+tasks.command('move')
+  .description('move or reparent tasks from a JSON file')
+  .requiredOption('--file <path>', 'JSON file containing move_tasks arguments')
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, options: { file: string; dryRun?: boolean }) {
+    await callTool(this.parent ?? program, 'move_tasks', await readJsonFile(options.file), true, options.dryRun);
   });
 
 tasks.command('delete <taskId>')
   .description('delete one task after explicit confirmation')
   .option('--yes', 'confirm destructive operation')
-  .action(async function (this: Command, taskId: string, options: { yes?: boolean }) {
-    if (!options.yes) await confirmDestructive(`Delete task ${taskId}?`);
-    await callTool(this.parent ?? program, 'delete_tasks', { taskIds: [taskId] }, true);
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, taskId: string, options: { yes?: boolean; dryRun?: boolean }) {
+    if (!options.yes && !options.dryRun) await confirmDestructive(`Delete task ${taskId}?`);
+    await callTool(this.parent ?? program, 'delete_tasks', { taskIds: [taskId] }, true, options.dryRun);
   });
 
 const dependencies = program.command('dependencies').description('Manage task dependencies');
@@ -330,15 +357,17 @@ dependencies.command('link')
   .requiredOption('--to <taskId>', 'successor task ID')
   .option('--type <type>', 'FS, SS, FF, or SF', 'FS')
   .option('--lag <days>', 'signed lag in project days', '0')
-  .action(async function (this: Command, options: { from: string; to: string; type: string; lag: string }) {
-    await callTool(this.parent ?? program, 'link_tasks', { links: [{ predecessorTaskId: options.from, successorTaskId: options.to, type: options.type, lag: Number.parseInt(options.lag, 10) || 0 }] }, true);
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, options: { from: string; to: string; type: string; lag: string; dryRun?: boolean }) {
+    await callTool(this.parent ?? program, 'link_tasks', { links: [{ predecessorTaskId: options.from, successorTaskId: options.to, type: options.type, lag: Number.parseInt(options.lag, 10) || 0 }] }, true, options.dryRun);
   });
 
 dependencies.command('unlink')
   .requiredOption('--from <taskId>', 'predecessor task ID')
   .requiredOption('--to <taskId>', 'successor task ID')
-  .action(async function (this: Command, options: { from: string; to: string }) {
-    await callTool(this.parent ?? program, 'unlink_tasks', { links: [{ predecessorTaskId: options.from, successorTaskId: options.to }] }, true);
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, options: { from: string; to: string; dryRun?: boolean }) {
+    await callTool(this.parent ?? program, 'unlink_tasks', { links: [{ predecessorTaskId: options.from, successorTaskId: options.to }] }, true, options.dryRun);
   });
 
 const schedule = program.command('schedule').description('Validate and shift the schedule');
@@ -360,9 +389,10 @@ schedule.command('slice')
 schedule.command('shift')
   .requiredOption('--days <number>', 'signed number of project days')
   .option('--yes', 'confirm destructive operation')
-  .action(async function (this: Command, options: { days: string; yes?: boolean }) {
-    if (!options.yes) await confirmDestructive('Shift the entire project schedule?');
-    await callTool(this.parent ?? program, 'shift_project', { deltaDays: Number.parseInt(options.days, 10) }, true);
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, options: { days: string; yes?: boolean; dryRun?: boolean }) {
+    if (!options.yes && !options.dryRun) await confirmDestructive('Shift the entire project schedule?');
+    await callTool(this.parent ?? program, 'shift_project', { deltaDays: Number.parseInt(options.days, 10) }, true, options.dryRun);
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {

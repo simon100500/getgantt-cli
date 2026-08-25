@@ -21,9 +21,16 @@ export function print(value: unknown, json: boolean, human?: string): void {
 export function printError(error: unknown, json: boolean): void {
   const message = error instanceof Error ? error.message : String(error);
   if (json) {
-    process.stderr.write(`${JSON.stringify({ error: message })}\n`);
+    const apiError = error as { code?: unknown; details?: unknown; requestId?: unknown };
+    process.stderr.write(`${JSON.stringify({
+      error: {
+        message,
+        ...(typeof apiError.code === 'string' ? { code: apiError.code } : {}),
+        ...(apiError.details !== undefined ? { details: apiError.details } : {}),
+        ...(typeof apiError.requestId === 'string' ? { requestId: apiError.requestId } : {}),
+      },
+    })}\n`);
   } else {
     process.stderr.write(`Error: ${message}\n`);
   }
 }
-

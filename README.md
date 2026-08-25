@@ -51,11 +51,14 @@ gantt tasks create --file create.json
 gantt tasks update --file update.json
 gantt tasks delete <task-id> --yes
 gantt dependencies link --from <predecessor> --to <successor> --type FS
+gantt tasks move --file moves.json --dry-run
 ```
 
 Публичный контракт находится в [OpenAPI](docs/openapi.yaml). Операции чтения и
 изменения проходят через общий typed catalog; mutation calls требуют текущий
 `baseVersion` и `Idempotency-Key`, а ответ содержит authoritative receipt.
+Флаг `--dry-run` выполняется сервером: CLI не имитирует изменение локально и не
+пишет в проект.
 
 Релизная последовательность и безопасное применение Prisma migration описаны в
 [deployment checklist](docs/deployment.md). Серверные routes уже зарегистрированы

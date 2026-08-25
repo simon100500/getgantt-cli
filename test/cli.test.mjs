@@ -34,6 +34,7 @@ test('API client exposes the server error code without exposing credentials', as
       () => new GetGanttApiClient('https://example.test', 'ggt_pat_secret').projects(),
       (error) => error instanceof ApiError
         && error.code === 'scope_required'
+        && error.requestId === 'req-1'
         && !error.message.includes('ggt_pat_secret'),
     );
   } finally {
@@ -74,6 +75,37 @@ test('API client sends a typed tool call with graph version and idempotency key'
       arguments: { deltaDays: 3 },
       baseVersion: 4,
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('API client sends server-owned dry-run requests without changing the auth envelope', async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (input, init) => {
+    request = { input: String(input), init };
+    return new Response(JSON.stringify({
+      catalogVersion: '1',
+      tool: 'shift_project',
+      projectId: 'p1',
+      dryRun: true,
+      data: { status: 'accepted', baseVersion: 4, newVersion: 5 },
+      requestId: 'req-preview',
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    await new GetGanttApiClient('https://example.test', 'ggt_pat_secret').toolCall({
+      projectId: 'p1',
+      tool: 'shift_project',
+      arguments: { deltaDays: 3 },
+      baseVersion: 4,
+      idempotencyKey: 'idem-preview',
+      dryRun: true,
+    });
+    assert.equal(request.init.headers.Authorization, 'Bearer ggt_pat_secret');
+    assert.equal(JSON.parse(request.init.body).dryRun, true);
   } finally {
     globalThis.fetch = originalFetch;
   }
