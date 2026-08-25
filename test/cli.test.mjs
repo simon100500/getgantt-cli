@@ -40,3 +40,41 @@ test('API client exposes the server error code without exposing credentials', as
     globalThis.fetch = originalFetch;
   }
 });
+
+test('API client sends a typed tool call with graph version and idempotency key', async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (input, init) => {
+    request = { input: String(input), init };
+    return new Response(JSON.stringify({
+      catalogVersion: '1',
+      tool: 'shift_project',
+      projectId: 'p1',
+      data: { status: 'accepted', baseVersion: 4, newVersion: 5 },
+      receipt: { idempotencyKey: 'idem-1', baseVersion: 4, newVersion: 5, status: 'accepted', changedTaskIds: [], changedDependencyIds: [] },
+      requestId: 'req-1',
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const response = await new GetGanttApiClient('https://example.test', 'ggt_pat_secret').toolCall({
+      projectId: 'p1',
+      tool: 'shift_project',
+      arguments: { deltaDays: 3 },
+      baseVersion: 4,
+      idempotencyKey: 'idem-1',
+    });
+    assert.equal(response.receipt.newVersion, 5);
+    assert.equal(request.input, 'https://example.test/api/cli/v1/tool-calls');
+    assert.equal(request.init.headers['Idempotency-Key'], 'idem-1');
+    assert.deepEqual(JSON.parse(request.init.body), {
+      catalogVersion: '1',
+      projectId: 'p1',
+      tool: 'shift_project',
+      arguments: { deltaDays: 3 },
+      baseVersion: 4,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
