@@ -2,8 +2,8 @@
 // FILE: src/index.ts
 // VERSION: 1.0.0
 // START_MODULE_CONTRACT
-//   PURPOSE: Provide the public GetGantt CLI commands for authentication and project navigation.
-//   SCOPE: Wire Commander commands, profiles, project selection, JSON output, and exit codes.
+//   PURPOSE: Provide the public GetGantt CLI commands for authentication, project navigation, and the complete tool gateway.
+//   SCOPE: Wire Commander commands, profiles, project selection, catalog discovery, typed tool calls, JSON output, and exit codes.
 //   DEPENDS: M-CLI-CONFIG, M-CLI-API, Commander.js
 //   LINKS: M-CLI, M-CLI-AUTH, M-CLI-API, M-CLI-CONFIG
 //   ROLE: RUNTIME
@@ -16,7 +16,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { ApiError, GetGanttApiClient, type Project } from './api-client.js';
+import { ApiError, GetGanttApiClient, type Project, type ToolCatalogOperation } from './api-client.js';
 import { envToken, loadConfig, saveConfig, type CliProfile } from './config.js';
 import { print, printError } from './output.js';
 
@@ -102,10 +102,13 @@ async function resolveClient(command: Command): Promise<ResolvedClient> {
   return { config, profileName, profile: storedProfile, client: makeClient(storedProfile, command) };
 }
 
-async function resolveProject(command: Command, resolved: ResolvedClient): Promise<Project> {
+async function resolveProject(command: Command, resolved: ResolvedClient, argumentProjectId?: string): Promise<Project> {
   const projectsResult = await resolved.client.projects();
   const explicit = command.optsWithGlobals().project as string | undefined;
-  const selector = explicit ?? resolved.profile.projectId;
+  if (explicit && argumentProjectId && explicit !== argumentProjectId) {
+    throw new Error(`Project conflict: --project selects ${explicit}, but the JSON payload selects ${argumentProjectId}`);
+  }
+  const selector = explicit ?? argumentProjectId ?? resolved.profile.projectId;
   const matches = selector
     ? projectsResult.items.filter((project) => project.id === selector || project.name === selector)
     : projectsResult.items.length === 1 ? [projectsResult.items[0]!] : [];
@@ -156,6 +159,73 @@ async function callTool(
     ...(mutating ? { baseVersion: project.version ?? undefined, idempotencyKey: randomUUID(), dryRun } : {}),
   });
   print(mutating ? { data: response.data, receipt: response.receipt, dryRun, requestId: response.requestId } : response.data, isJson(command), JSON.stringify(mutating ? { ...(response.receipt ?? {}), ...(dryRun ? { status: 'preview' } : {}) } : response.data, null, 2));
+}
+
+function parseNumber(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`${label} must be a finite number`);
+  return parsed;
+}
+
+function isProjectFreeTool(tool: string): boolean {
+  return tool === 'list_domain_packs' || tool === 'get_domain_pack';
+}
+
+async function callCatalogTool(
+  command: Command,
+  operation: ToolCatalogOperation,
+  args: Record<string, unknown>,
+  options: { dryRun?: boolean; yes?: boolean; idempotencyKey?: string },
+): Promise<void> {
+  const resolved = await resolveClient(command);
+  const argumentProjectId = typeof args.projectId === 'string' && args.projectId.trim() ? args.projectId.trim() : undefined;
+  const project = isProjectFreeTool(operation.name) ? undefined : await resolveProject(command, resolved, argumentProjectId);
+  const dryRun = options.dryRun === true;
+  if (operation.mutating && !options.yes && !dryRun) {
+    await confirmDestructive(`Run mutating tool ${operation.name}?`);
+  }
+  const response = await resolved.client.toolCall({
+    ...(project ? { projectId: project.id } : {}),
+    tool: operation.name,
+    arguments: args,
+    ...(operation.mutating ? {
+      baseVersion: project?.version ?? undefined,
+      idempotencyKey: options.idempotencyKey ?? randomUUID(),
+      dryRun,
+    } : {}),
+  });
+  const value = operation.mutating
+    ? { data: response.data, receipt: response.receipt, dryRun, requestId: response.requestId }
+    : response.data;
+  const human = operation.mutating
+    ? JSON.stringify({ ...(response.receipt ?? {}), ...(dryRun ? { status: 'preview' } : {}) }, null, 2)
+    : JSON.stringify(response.data, null, 2);
+  print(value, isJson(command), human);
+}
+
+async function callCatalogReadCommand(
+  command: Command,
+  operation: string,
+  args: Record<string, unknown>,
+): Promise<void> {
+  const resolved = await resolveClient(command);
+  if (operation === 'projects.list') {
+    const result = await resolved.client.projects();
+    print(result, isJson(command), result.items.map((project) => `${project.id}  ${project.name}  (${project.status})`).join('\n'));
+    return;
+  }
+
+  const argumentProjectId = typeof args.projectId === 'string' && args.projectId.trim() ? args.projectId.trim() : undefined;
+  const project = await resolveProject(command, resolved, argumentProjectId);
+  if (operation === 'projects.get') {
+    print({ project }, isJson(command), `${project.name} — version ${project.version ?? '?'}, ${project.taskCount ?? 0} tasks`);
+    return;
+  }
+
+  const requestedLimit = typeof args.limit === 'number' ? args.limit : Number(args.limit ?? 500);
+  const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.trunc(requestedLimit), 1), 5000) : 500;
+  const result = await resolved.client.tasks(project.id, limit);
+  print(result, isJson(command), result.items.map((task: any) => `${task.id}  ${task.name}  ${String(task.startDate).slice(0, 10)} → ${String(task.endDate).slice(0, 10)}`).join('\n'));
 }
 
 function exitCodeForError(error: unknown): number {
@@ -291,6 +361,40 @@ project.command('show')
     print({ project: selected }, isJson(command), `${selected.name} — version ${selected.version ?? '?'}, ${selected.taskCount ?? 0} tasks`);
   });
 
+const tools = program.command('tools').description('Discover and call the complete public tool catalog; run "gantt tools list" for names and schemas');
+
+tools.command('list')
+  .description('list all public tools and their JSON schemas')
+  .action(async function (this: Command) {
+    const command = this.parent ?? program;
+    const resolved = await resolveClient(command);
+    const catalog = await resolved.client.toolCatalog();
+    const human = catalog.operations
+      .map((operation) => `${operation.mutating ? 'write' : 'read '}  ${operation.name}  [${operation.scope}]  ${operation.description}`)
+      .join('\n');
+    print(catalog, isJson(command), human);
+  });
+
+tools.command('call <toolName>')
+  .description('call a public tool by name with arguments from a JSON file; use "gantt tools list" first')
+  .option('--file <path>', 'JSON object containing tool arguments')
+  .option('--yes', 'confirm a mutating tool call')
+  .option('--dry-run', 'preview a mutation without committing it')
+  .option('--idempotency-key <key>', 'reuse a key when safely retrying the same mutation')
+  .action(async function (this: Command, toolName: string, options: { file?: string; yes?: boolean; dryRun?: boolean; idempotencyKey?: string }) {
+    const command = this.parent ?? program;
+    const resolved = await resolveClient(command);
+    const catalog = await resolved.client.toolCatalog();
+    const operation = catalog.operations.find((candidate) => candidate.name === toolName);
+    if (!operation) throw new Error(`Unknown tool: ${toolName}. Run: gantt tools list`);
+    const args = options.file ? await readJsonFile(options.file) : {};
+    if (operation.name === 'projects.list' || operation.name === 'projects.get' || operation.name === 'schedule.tasks.list') {
+      await callCatalogReadCommand(command, operation.name, args);
+      return;
+    }
+    await callCatalogTool(command, operation, args, options);
+  });
+
 const tasks = program.command('tasks').description('Read and change project tasks');
 
 tasks.command('list')
@@ -339,6 +443,26 @@ tasks.command('move')
   .option('--dry-run', 'preview the mutation without committing it')
   .action(async function (this: Command, options: { file: string; dryRun?: boolean }) {
     await callTool(this.parent ?? program, 'move_tasks', await readJsonFile(options.file), true, options.dryRun);
+  });
+
+tasks.command('shift <taskId>')
+  .description('shift one task and its affected schedule by signed project days')
+  .requiredOption('--days <number>', 'signed number of project days')
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, taskId: string, options: { days: string; dryRun?: boolean }) {
+    await callTool(this.parent ?? program, 'shift_tasks', { shifts: [{ taskId, delta: parseNumber(options.days, '--days') }] }, true, options.dryRun);
+  });
+
+tasks.command('duration <taskId>')
+  .description('change one task duration while preserving its start or end edge')
+  .requiredOption('--days <number>', 'new duration in project days')
+  .option('--anchor <edge>', 'edge to preserve: start or end', 'end')
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, taskId: string, options: { days: string; anchor: string; dryRun?: boolean }) {
+    if (options.anchor !== 'start' && options.anchor !== 'end') throw new Error('--anchor must be start or end');
+    const days = parseNumber(options.days, '--days');
+    if (days < 1) throw new Error('--days must be at least 1');
+    await callTool(this.parent ?? program, 'change_task_duration', { changes: [{ taskId, durationDays: days, anchor: options.anchor }] }, true, options.dryRun);
   });
 
 tasks.command('delete <taskId>')
@@ -393,6 +517,13 @@ schedule.command('shift')
   .action(async function (this: Command, options: { days: string; yes?: boolean; dryRun?: boolean }) {
     if (!options.yes && !options.dryRun) await confirmDestructive('Shift the entire project schedule?');
     await callTool(this.parent ?? program, 'shift_project', { deltaDays: Number.parseInt(options.days, 10) }, true, options.dryRun);
+  });
+
+schedule.command('recalculate')
+  .description('recalculate the entire project from its current dependency graph')
+  .option('--dry-run', 'preview the mutation without committing it')
+  .action(async function (this: Command, options: { dryRun?: boolean }) {
+    await callTool(this.parent ?? program, 'recalculate_project', {}, true, options.dryRun);
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {

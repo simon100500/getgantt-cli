@@ -26,6 +26,7 @@ auth login читает PAT через скрытый prompt или stdin, пр�
     gantt tasks show <task-id>
     gantt schedule validate
     gantt schedule slice [--start <YYYY-MM-DD>] [--end <YYYY-MM-DD>]
+    gantt tools list
 
 tasks list возвращает до 500 задач по умолчанию и максимум 5000; пагинация
 сервера обрабатывается CLI внутри заданного лимита.
@@ -39,6 +40,31 @@ tasks list возвращает до 500 задач по умолчанию и �
     gantt dependencies link --from <id> --to <id> [--type FS|SS|FF|SF] [--lag <days>] [--dry-run]
     gantt dependencies unlink --from <id> --to <id> [--dry-run]
     gantt schedule shift --days <signed-number> [--yes] [--dry-run]
+    gantt schedule recalculate [--dry-run]
+    gantt tasks shift <task-id> --days <signed-number> [--dry-run]
+    gantt tasks duration <task-id> --days <number> [--anchor start|end] [--dry-run]
+
+Для полного публичного каталога без отдельной обёртки:
+
+    gantt tools call <tool-name> --file <arguments.json> [--yes] [--dry-run]
+
+`tools list` возвращает актуальные JSON-схемы. Публичные операции включают:
+
+    get_project_summary       get_schedule_slice       find_tasks
+    get_task_context          create_tasks             update_tasks
+    move_tasks                shift_project            shift_tasks
+    change_task_duration      delete_tasks             link_tasks
+    unlink_tasks               recalculate_project      validate_schedule
+    list_domain_packs          get_domain_pack          create_work_template
+    update_work_template       delete_work_template    create_location
+    update_location             delete_location         create_work_dependency
+    remove_work_dependency      assign_work             move_work_dates
+    reset_assignment            list_work_templates     list_locations
+    list_work_dependencies
+
+В каталоге также видны встроенные read-команды `projects.list`, `projects.get` и
+`schedule.tasks.list`; `tools call` выполняет их через соответствующие локальные
+команды CLI.
 
 CLI передаёт серверу текущий baseVersion и генерирует Idempotency-Key. Сервер
 возвращает receipt с новой версией и изменёнными ID.
@@ -80,5 +106,25 @@ CLI передаёт серверу текущий baseVersion и генерир
       ]
     }
 
+Сдвиг конкретной задачи:
+
+    {
+      "shifts": [
+        {"taskId": "task-id", "delta": 22}
+      ]
+    }
+
+Изменение длительности:
+
+    {
+      "changes": [
+        {"taskId": "task-id", "durationDays": 10, "anchor": "end"}
+      ]
+    }
+
 JSON-массив тоже принимается, но оборачивается CLI как { "items": [...] };
 для мутаций используй объектные формы выше.
+
+Важно: `tasks update` / `update_tasks` меняет только метаданные задачи. Даты
+меняются через `tasks shift` / `shift_tasks`, длительность — через `tasks duration`
+/ `change_task_duration`, а весь проект — через `schedule shift` / `shift_project`.

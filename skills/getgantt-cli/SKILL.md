@@ -12,6 +12,11 @@ description: >-
 списка команд прочитай
 [references/command-reference.md](references/command-reference.md).
 
+Если короткой команды недостаточно, сначала выполни `gantt --json tools list`,
+выбери точное имя публичной операции и вызови её через
+`gantt --json tools call <tool-name> --file <json>`. Не выдумывай поля payload:
+схема операции приходит с сервера.
+
 ## Подключение
 
 1. Проверь установку: gantt --help.
@@ -40,8 +45,19 @@ description: >-
     gantt --project <project-uuid> --json tasks find "Фундамент"
     gantt --project <project-uuid> --json tasks show <task-uuid>
     gantt --project <project-uuid> --json schedule validate
+    gantt --project <project-uuid> --json tools list
 
 Если имя задачи неоднозначно, остановись и попроси уточнение.
+
+## Карта возможностей
+
+Публичный CLI-каталог умеет читать и изменять задачи, иерархию, даты,
+длительности и зависимости, а также работать с шаблонами работ, локациями и
+назначениями. Он умеет проверять и перерасчитывать расписание.
+
+Полный список имён и JSON-схем всегда получай командой:
+
+    gantt --json tools list
 
 ## Изменения
 
@@ -56,6 +72,11 @@ description: >-
 
 Для tasks delete и schedule shift в неинтерактивном режиме добавляй --yes.
 Preview не является выполненным изменением.
+
+Для сдвига конкретной задачи используй `tasks shift` или `shift_tasks`, а не
+`tasks update`: `update_tasks` не принимает даты. Для изменения длительности
+используй `tasks duration` или `change_task_duration`. Для родительской задачи
+не дублируй сдвиг дочерних задач, если серверный каскад уже переносит subtree.
 
 При 409 или exit code 7 перечитай проект и контекст, не повторяй мутацию
 вслепую. После таймаута сначала проверь, произошла ли операция; новый процесс

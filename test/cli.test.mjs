@@ -110,3 +110,24 @@ test('API client sends server-owned dry-run requests without changing the auth e
     globalThis.fetch = originalFetch;
   }
 });
+
+test('API client discovers the server-owned public tool catalog', async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (input, init) => {
+    request = { input: String(input), init };
+    return new Response(JSON.stringify({
+      version: '1',
+      operations: [{ name: 'shift_tasks', description: 'Shift tasks', inputSchema: { type: 'object' }, mutating: true, scope: 'schedule:write' }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const catalog = await new GetGanttApiClient('https://example.test', 'ggt_pat_secret').toolCatalog();
+    assert.equal(catalog.operations[0].name, 'shift_tasks');
+    assert.equal(request.input, 'https://example.test/api/cli/v1/tool-catalog');
+    assert.equal(request.init.headers.Authorization, 'Bearer ggt_pat_secret');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -2,7 +2,7 @@
 // VERSION: 1.0.0
 // START_MODULE_CONTRACT
 //   PURPOSE: Call the versioned GetGantt CLI API with a personal access token.
-//   SCOPE: Normalize base URLs, send authenticated requests, expose typed reads, and call the public tool gateway.
+//   SCOPE: Normalize base URLs, send authenticated requests, expose typed reads, discover the public tool catalog, and call the public tool gateway.
 //   DEPENDS: Node fetch
 //   LINKS: M-CLI-API, M-CLI-AUTH
 //   ROLE: RUNTIME
@@ -41,6 +41,19 @@ export type ToolCallResponse<T = unknown> = {
     changedDependencyIds: string[];
   };
   requestId: string;
+};
+
+export type ToolCatalogOperation = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  mutating: boolean;
+  scope: string;
+};
+
+export type ToolCatalogResponse = {
+  version: string;
+  operations: ToolCatalogOperation[];
 };
 
 export class ApiError extends Error {
@@ -97,6 +110,10 @@ export class GetGanttApiClient {
       cursor = page.nextCursor ?? undefined;
     } while (cursor && items.length < limit);
     return { projectId, version, items: items.slice(0, limit), nextCursor: cursor ?? null };
+  }
+
+  async toolCatalog(): Promise<ToolCatalogResponse> {
+    return this.get<ToolCatalogResponse>('/tool-catalog');
   }
 
   async toolCall<T = unknown>(params: {
