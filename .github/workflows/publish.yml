@@ -1,10 +1,8 @@
 name: Publish CLI to npm
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -16,10 +14,13 @@ concurrency:
 
 jobs:
   publish:
+    if: github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
