@@ -59,20 +59,20 @@ CLI не должен:
 - встроенный `fetch` для HTTP;
 - Zod для проверки API-ответов и локальных файлов ввода;
 - `node:test` для unit и integration tests;
-- npm package `@getgantt/cli` с исполняемой командой `gantt`;
+- npm package `getgantt-cli` с исполняемой командой `gantt`;
 - OpenAPI как публичный серверный контракт и источник генерируемых API-типов.
 
 Первая поставка распространяется через npm:
 
 ```bash
-npm install -g @getgantt/cli
+npm install -g getgantt-cli
 gantt --help
 ```
 
 Одноразовый запуск:
 
 ```bash
-npx @getgantt/cli projects list
+npx getgantt-cli projects list
 ```
 
 Standalone-бинарники не входят в MVP. Их можно добавить после стабилизации API

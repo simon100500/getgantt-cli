@@ -1,5 +1,5 @@
 {
-  "name": "@getgantt/cli",
+  "name": "getgantt-cli",
   "version": "0.1.0",
   "description": "Command-line client for GetGantt",
   "type": "module",

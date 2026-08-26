@@ -22,7 +22,7 @@ node dist/index.js --help
 Публикуемая установка после выхода пакета:
 
 ```bash
-npm install -g @getgantt/cli
+npm install -g getgantt-cli
 gantt auth login
 gantt projects list
 ```
